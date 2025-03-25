@@ -11,7 +11,7 @@ from staticLin import (
 
 
 def main():
-    start = np.array([0.1, 0.1, np.pi / 2 * 0.2, 0, 0])
+    start = np.array([0.1, 0.1, np.pi/2*0.1, 0, 0])
     dt = 0.01
     model = UnicycleModel(state=start, dt=dt)
     simulator = SimulatorDynamics
@@ -22,9 +22,9 @@ def main():
     initial_condition = np.concatenate([h, h_d1, start])
 
     # TODO chose trajectory generator
-    trajectory_generator = trajectory_generator_circle
+    trajectory_generator = trajectory_generator_square
 
-    stats, solver = sim.run(initial_condition, 6, dt, trajectory_generator)
+    stats, solver = sim.run(initial_condition, 60, dt, trajectory_generator)
     stats = {"t": solver["t"], "h": solver["y"][0:2], "h_d1": solver["y"][2:4], "q": solver["y"][4:9]}
     stats["hd"], stats["hd_d1"], stats["hd_d2"] = trajectory_generator(stats["t"])
     stats["eh"] = stats["h"] - stats["hd"]

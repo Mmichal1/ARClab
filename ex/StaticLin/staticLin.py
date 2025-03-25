@@ -152,11 +152,23 @@ class UnicycleModel(Model):
 
 def trajectory_generator_square(t, dt=1):
     if type(t) != np.ndarray:
-        # TODO: generate square trajectory
-        # with e.g. piece wise approach
-        h = np.array([0, 0])
-        h_d1 = np.array([0, 0])
-        h_d2 = np.array([0, 0])
+        t = t % 4
+        if 0 <= t < 1:
+            h = np.array((t, 0)) 
+            h_d1 = np.array((1, 0)) 
+            h_d2 = np.array((0, 0)) 
+        if 1 <= t < 2:
+            h = np.array((1, t - 1)) 
+            h_d1 = np.array((0, 1)) 
+            h_d2 = np.array((0, 0)) 
+        if 2 <= t < 3:
+            h = np.array((3-t, 1)) 
+            h_d1 = np.array((-1, 0)) 
+            h_d2 = np.array((0, 0)) 
+        if 3 <= t < 4:
+            h = np.array((0, 4-t)) 
+            h_d1 = np.array((0, -1)) 
+            h_d2 = np.array((0, 0)) 
     else:
         # do not change below code of this function
         h = np.zeros((2, len(t)))
@@ -171,8 +183,8 @@ def trajectory_generator_square(t, dt=1):
 def trajectory_generator_circle(t, w=np.pi * 0.4, offset=0.2, A=1.0):
     h = np.array([A * np.cos(t * w + offset), A * np.sin(t * w + offset)])
     # TODO: calculate first and second derivative
-    h_d1 = np.array([t, t])
-    h_d2 = np.array([t, t])
+    h_d1 = np.array([-A * w * np.sin(t* w + offset), A * w * np.cos(t* w + offset)])
+    h_d2 = np.array([-A * w**2 * np.cos(t* w + offset), - A * w**2 * np.sin(t* w + offset)])
     return h, h_d1, h_d2
 
 
@@ -216,72 +228,74 @@ class SimulatorDynamics(Simulator):
         self._dt = dt
 
     def step(self, t, state):
-        # state = [ h, h_d1, k ] = [ h1, h2, h1', h2', x, y, theta, phi_r, phi_l ]
-        #   - h      = state[0:2]
-        #   - h_d1   = state[2:4]
-        #   - k      = state[4:9] (which is q = [x, y, theta, phi_r, phi_l])
+        Kp = 200
+        Kd = 20
 
         h = state[0:2]
         h_d1 = state[2:4]
-        k = state[4:9]  # unicycle "full" state
-        q = k.reshape((-1,))  # same as k, just cleaner symbol
-        self._model.state = q  # update the model’s internal state
+        k = state[4:9]  
+        q = k.reshape((-1,))  
 
-        # Unicycle parameters
         e = self._model.e
         delta = self._model.delta
 
-        # Matrices from the model
+        hd, hd_d1, hd_d2 = self._trajectory(t)
+
+        self._model.state = q 
         M = self._model.M
         B = self._model.B
         G = self._model.G
 
-        # -----------------------------
-        # 1) Compute Jacobian dh/dq
-        #    h(q) = [ x + e cos(theta + delta),
-        #             y + e sin(theta + delta) ]
-        # -----------------------------
-        x, y, theta = q[0], q[1], q[2]
-        dh_dq = np.array([[1.0, 0.0, -e * np.sin(theta + delta)], [0.0, 1.0, e * np.cos(theta + delta)]])  # shape 2x3
+        GT = G.T
 
-        # Rinv, R, etc. (we won't use them for pure constant-driving,
-        # but we’ll fill them to keep the structure)
+
+        x, y, theta = q[0], q[1], q[2]
+        dh_dq = np.array([[1.0, 0.0, -e * np.sin(theta + delta)], 
+                          [0.0, 1.0, e * np.cos(theta + delta)]])  
+
         Rinv = dh_dq @ G[0:3, :]  # 2x2
         detRinv = np.linalg.det(Rinv)
+
         R = np.linalg.inv(Rinv)  # 2x2
         detR = np.linalg.det(R)
         RT = R.T
 
-        # For demonstration we skip advanced dynamics
-        # and set Ms, Cs, Bs, etc. to identity-like.
-        Ms = np.eye(2)
-        Cs = np.zeros((2, 2))
-        Bs = np.eye(2)
+        
+        k_d1 = G @ R @ h_d1
+        q_d1 = k_d1[0:3]
+        
+        R_d1 = q_d1[2] / np.cos(delta) * \
+            np.array([[- np.sin(q[2] + delta),   np.cos(q[2] + delta)],
+                      [- np.cos(q[2]) / e, - np.sin(q[2]) / e]])
 
-        Mh = np.eye(2)
-        Ch = np.zeros((2, 2))
-        Bh = np.eye(2)
 
-        # 2) Constant wheel velocities for Task 1
-        u = np.array([0.1, 0.1])  # Right wheel = 0.1, Left wheel = 0.1
+        Ms = GT @ M @ G
+        Cs = GT @ M @ self._model.G_d1(q_d1)
+        Bs = GT @ B
 
-        # 3) We get q' = G @ u for the dynamic model’s states
-        k_d1 = G @ u  # shape (5,)
+        Mh = RT @ Ms @ R
+        Ch = RT @ (Ms @ R_d1 + Cs @ R)
+        Bh = RT @ Bs
 
-        # 4) The linearized velocities h_d1 = d/dt [h(q)] = dh/dq * q'
-        #    but note h depends only on (x,y,theta), so we only use the first 3 entries of q'.
-        q_d1_xyz = k_d1[0:3]
-        new_h_d1 = dh_dq @ q_d1_xyz
+        Mhinv = np.linalg.inv(Mh)
+        Dh = np.zeros((2))
+        Fh = -Mhinv @ Ch @ h_d1 - Mhinv @ Dh
+        Gh =  Mhinv @ Bh
+        
+        eh = h - hd
+        eh_d1 = h_d1 - hd_d1
+        
+        v = hd_d2 - Kp * eh - Kd *eh_d1
+        u = np.linalg.inv(Gh) @ (v-Fh)
+        
 
-        # 5) The second derivative of h, h_d2, is zero if we apply constant inputs
-        new_h_d2 = np.zeros(2)  # we’re not controlling or accelerating in tasks 1
 
-        # 6) Form the new ODE state derivative
-        #    We are integrating [h, h_d1, k].
-        #    So derivative is [h_d1, h_d2, k_d1].
+        new_h_d1 = dh_dq @ q_d1
+
+        new_h_d2 = Fh + Gh @ u
+
         new_state = np.concatenate([new_h_d1, new_h_d2, k_d1])
 
-        # For logging/printing
         if t >= self._stats.get("next", 0.0):
             self._stats["next"] = t + self._dt
             print(
