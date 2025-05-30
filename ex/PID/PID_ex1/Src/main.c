@@ -30,14 +30,20 @@
 
 // --> include all necessary headers for
 // printf() redirection
-// FreeRTOS related headers
+#include "FreeRTOS.h"
+#include "task.h"
+#include "queue.h"
 #include "pid.h"
+#include "stdio.h"
+#include "stdlib.h"
 
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
-
+typedef struct {
+    uint16_t mv, dv, cs;
+} LogMsg;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -53,7 +59,10 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-
+static volatile uint8_t uartByte;
+static QueueHandle_t xQueueMv;
+static QueueHandle_t xQueueDv;
+static QueueHandle_t xQueueLog;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -64,61 +73,100 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) {
-
+int _write(int file, char *ptr, int len) {
+	HAL_UART_Transmit(&huart2, (uint8_t*) ptr, len, 50);
+	return len;
 }
 
+/* USER CODE BEGIN 4 */
 void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart) {
+    HAL_UART_Receive_IT(&huart2, (uint8_t *)&uartByte, 1);
+}
 
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) {
+    static uint16_t adcVal;
+    adcVal = HAL_ADC_GetValue(hadc);
+    BaseType_t xHigher = pdFALSE;
+    xQueueOverwriteFromISR(xQueueMv, &adcVal, &xHigher);
+    portYIELD_FROM_ISR(xHigher);
 }
 
 void measureTask(void *args) {
-	TickType_t xLastWakeTime;
+    TickType_t xLast = xTaskGetTickCount();
+    uint16_t   adcVal;
 
-	xLastWakeTime = xTaskGetTickCount();
+    for (;;) {
+        HAL_ADC_Start(&hadc1);
 
-	for (;;) {
+        if (HAL_ADC_PollForConversion(&hadc1, 100) == HAL_OK) {
+            adcVal = HAL_ADC_GetValue(&hadc1);
+            xQueueOverwrite(xQueueMv, &adcVal);
+        }
 
-	}
-}
+        HAL_ADC_Stop(&hadc1);
 
-void controlTask(void *args) {
-	TickType_t xLastWakeTime;
-
-	xLastWakeTime = xTaskGetTickCount();
-
-	for (;;) {
-
-	}
-}
-
-void commTask(void *args) {
-	TickType_t xLastWakeTime;
-
-	xLastWakeTime = xTaskGetTickCount();
-
-	for (;;) {
-
-	}
+        vTaskDelayUntil(&xLast, pdMS_TO_TICKS(10));
+    }
 }
 
 void userTask(void *args) {
-	TickType_t xLastWakeTime;
+    TickType_t xLast = xTaskGetTickCount();
+    const uint16_t step = 500;
+	uint8_t c = uartByte;
 
-	xLastWakeTime = xTaskGetTickCount();
-
-	for (;;) {
-
-	}
+    for (;;)
+    {
+		c = atoi((char*)&uartByte);
+		if (c >= 0 && c <= 8) {
+			uint16_t dv = c * step;
+			xQueueOverwrite(xQueueDv, &dv);
+		}
+		vTaskDelayUntil(&xLast, pdMS_TO_TICKS(100));
+    }
 }
 
+void controlTask(void *args) {
+    TickType_t xLast = xTaskGetTickCount();
+    PID_t pid;
+    PID_Init(&pid,
+             1.0f,      // kp
+             0.2f,    	// ki
+             1.0f,		// kd
+             0.0f,		// out_min
+             4095.0f);	// out_max
+
+    uint16_t mv = 0, dv = 0, cs = 0;
+
+    for (;;) {
+        xQueueReceive(xQueueMv, &mv, 0);
+        xQueueReceive(xQueueDv, &dv, 0);
+
+        cs = PID_Update(&pid, (float)dv, (float)mv);
+
+		HAL_DAC_Start(&hdac1, DAC_CHANNEL_1);
+        HAL_DAC_SetValue(&hdac1, DAC_CHANNEL_1, DAC_ALIGN_12B_R, cs);
+
+        LogMsg log = {.mv = mv, .dv = dv, .cs = cs };
+        xQueueSend(xQueueLog, &log, 0);
+
+        vTaskDelayUntil(&xLast, pdMS_TO_TICKS(10));
+    }
+}
+
+void commTask(void *args) {
+    LogMsg log;
+    TickType_t xLast = xTaskGetTickCount();
+
+    for (;;) {
+        if (xQueueReceive(xQueueLog, &log, 0) == pdTRUE) {
+            printf("mv:%4u  dv:%4u  cs:%4u\r\n", log.mv, log.dv, log.cs);
+        }
+        vTaskDelayUntil(&xLast, pdMS_TO_TICKS(500));
+    }
+}
 /* USER CODE END 0 */
 
-/**
- * @brief  The application entry point.
- * @retval int
- */
+
 int main(void) {
 	/* USER CODE BEGIN 1 */
 
@@ -149,9 +197,17 @@ int main(void) {
 	/* USER CODE BEGIN 2 */
 
 	// enable UART receive in interrupt mode
-
+	HAL_UART_Receive_IT(&huart2, (uint8_t*)&uartByte, 1);
 	// --> create all necessary synchronization mechanisms
+	xQueueMv   = xQueueCreate(1, sizeof(uint16_t));
+	xQueueDv   = xQueueCreate(1, sizeof(uint16_t));
+	xQueueLog  = xQueueCreate(5, sizeof(LogMsg));
+
 	// --> create all necessary tasks
+	xTaskCreate(measureTask, "measure", 128, NULL, 3, NULL);
+	xTaskCreate(controlTask, "control", 256, NULL, 3, NULL);
+	xTaskCreate(userTask,    "user",    256, NULL, 2, NULL);
+	xTaskCreate(commTask,    "comm",    256, NULL, 1, NULL);
 	printf("Starting!\r\n");
 
 	// --> start FreeRTOS scheduler
@@ -165,7 +221,6 @@ int main(void) {
 	/* USER CODE BEGIN WHILE */
 	while (1) {
 		/* USER CODE END WHILE */
-
 		/* USER CODE BEGIN 3 */
 	}
 	/* USER CODE END 3 */

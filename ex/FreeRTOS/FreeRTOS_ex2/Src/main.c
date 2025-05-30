@@ -27,15 +27,29 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
 // --> include all necessary headers for
 // printf() redirection
+#include <stdio.h>
 // FreeRTOS related headers
+#include <FreeRTOS.h>
+#include <task.h>
+#include <semphr.h>
+#include <queue.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
 /* USER CODE BEGIN PTD */
+//typedef enum {
+//    QueueOK = 0,
+//    QueueWriteProblem,
+//    QueueEmpty,
+//    QueueCantRead
+//} QueueStatus;
 
+typedef struct {
+    uint16_t measurement;
+    uint32_t counter;
+} queue_data_t;
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -62,44 +76,56 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+int _write(int file, char *ptr, int len) {
+	HAL_UART_Transmit(&huart2, (uint8_t*) ptr, len, 50);
+	return len;
+}
 
-enum QueueStatus {
-	QueueOK, QueueWriteProblem, QueueEmpty, QueueCantRead
-};
-
-enum QueueMessages {
-	QueueMsgNoData, QueueMsgNewData, QueueMsgNewDataChange,
-};
-
-uint16_t measurement;
-uint8_t queueError = QueueOK;
-SemaphoreHandle_t mutex;
-QueueHandle_t queue;
+volatile uint16_t measurement = 0;
+uint32_t frameCounter = 0;
+QueueHandle_t mailbox;
 
 void measureTask(void *args) {
-	TickType_t xLastWakeTime;
-	BaseType_t xStatus;
+    TickType_t lastWake = xTaskGetTickCount();
+    for (;;) {
+        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(1000));
 
-	xLastWakeTime = xTaskGetTickCount();
-
-	for (;;) {
-
-	}
+        queue_data_t msg;
+        msg.measurement = measurement;
+        msg.counter = ++frameCounter;
+        xQueueOverwrite(mailbox, &msg);
+    }
 }
 
 void commTask(void *args) {
-	TickType_t xLastWakeTime;
-	uint16_t measurement_local = 0;
-	uint16_t flag_local;
-	uint16_t histeresis = 0;
-	BaseType_t queue_size;
-	BaseType_t xStatus;
+    TickType_t lastWake = xTaskGetTickCount();
+    uint32_t lastSeen = 0;
 
-	xLastWakeTime = xTaskGetTickCount();
+    for (;;) {
+        vTaskDelayUntil(&lastWake, pdMS_TO_TICKS(400));
 
-	for (;;) {
+        queue_data_t peeked;
+        uint8_t new_data = 0;
+        uint8_t error_flag = 0;
+        uint16_t measured_value = 0;
+        uint32_t counter = 0;
 
-	}
+        if (xQueuePeek(mailbox, &peeked, 0) == pdTRUE) {
+        	measured_value = peeked.measurement;
+            counter = peeked.counter;
+            if (peeked.counter != lastSeen) {
+                new_data = 1;
+                lastSeen = peeked.counter;
+            }
+        } else {
+            error_flag = 1;
+        }
+        printf("259312;%u;%lu;%u;%u\r\n",
+               (unsigned)measured_value,
+               (unsigned long)counter,
+               (unsigned)new_data,
+               (unsigned)error_flag);
+    }
 }
 
 /* USER CODE END 0 */
@@ -140,14 +166,26 @@ int main(void)
   /* USER CODE BEGIN 2 */
 
 	// --> start TIM1 to generate PWM signal on TIMER3 connector
+  	HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
 	// --> start TIM6 in interrupt
+  	HAL_TIM_Base_Start(&htim6);
 	// --> start ADC1 in DMA mode
+  	HAL_ADC_Start_DMA(&hadc1, (uint32_t*)&measurement, 1);
 	// --> create a mutex
+//  	mutex = xSemaphoreCreateMutex();
 	// --> create a queue
+    mailbox = xQueueCreate(1, sizeof(queue_data_t));
 	// --> create all necessary tasks
+
+    xTaskCreate(measureTask, "Measure", configMINIMAL_STACK_SIZE, NULL,
+                tskIDLE_PRIORITY + 2, NULL);
+    xTaskCreate(commTask,    "Comm",    configMINIMAL_STACK_SIZE, NULL,
+                tskIDLE_PRIORITY + 1, NULL);
+
 	printf("Starting!\r\n");
 
 	// --> start FreeRTOS scheduler
+	vTaskStartScheduler();
 
   /* USER CODE END 2 */
 
