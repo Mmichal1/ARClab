@@ -160,7 +160,7 @@ class Circle(Obstacle):
 
 class Rectangle(Obstacle):
 
-    def __init__(self, center: np.array, width=1, height=0.5, orientationDeg=0, **kwargs) -> None:
+    def __init__(self, center: np.array, width=1.0, height=0.5, orientationDeg=0, **kwargs) -> None:
         super().__init__(**kwargs)
         self._center = center
         self._width = width
@@ -234,7 +234,6 @@ class Rectangle(Obstacle):
 
         inside = (-width / 2 <= rotated_point[0] <= width / 2) and (-height / 2 <= rotated_point[1] <= height / 2)
 
-        distance = self.distance(point)
         return inside, distance
 
     def inside(self, point: np.array):
@@ -412,9 +411,9 @@ class MPC:
                 # TODO: 4. evaluate possible collision with obstacles
                 inside, distance_to_obstacle = obstacle.inside(state)
                 if inside:
-                    cost += 15.0  # hard penalty for collision
+                    cost += 5.0  # hard penalty for collision
                 else:
-                    cost += 2.0 / (distance_to_obstacle) * 0.4  # the closer, the larger the cost
+                    cost += 0.5 / (distance_to_obstacle) * 0.4  # the closer, the larger the cost
 
         return cost
 
